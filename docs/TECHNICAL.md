@@ -19,6 +19,7 @@
 | 能力 | 实现 |
 | --- | --- |
 | 素材导入 | PHPicker 有序多选（照片 + 视频混选，上限 12 个），照片降采样解码，视频拷贝到沙盒 |
+| 素材排序 | 缩略图条长按拖动调整顺序（UIKit drag & drop），顺序即时间轴顺序，改动后旧成片自动作废 |
 | 模板切换 | 顶部横向 chip 列表，模板来自 bundle 内所有合法模板 JSON，按 `order` 排序 |
 | 一键成片 | 素材 + 模板 → `AVComposition` + `AVVideoComposition` + `AVAudioMix` |
 | 预览 | `AVPlayer` + 自定义合成器；点画面暂停 / 继续，播完显示「重播」 |
@@ -637,7 +638,7 @@ UIView（渐变背景 CAGradientLayer）
       ├─ 标题 / 副标题
       ├─ UIScrollView（横向）→ UIStackView → 模板 chip（UIButton）
       ├─ 模板卡片（名称 / 参数 / 视频策略 / 时长估算）
-      ├─ 素材缩略图条（UIScrollView → UIStackView → cell[UIImageView + 「视频」角标]）
+      ├─ 素材缩略图条（UICollectionView 横向 flow layout → KBThumbnailCell[封面 + 序号 + 「视频」角标]）
       ├─ KBPlayerView（AVPlayerLayer 承载）→ 重播按钮
       ├─ 选择素材 / 一键成片 / 导出并保存到相册
       ├─ UIProgressView（导出进度）
@@ -706,6 +707,34 @@ self.playerHeightConstraint = make.height.mas_equalTo(0);   // 未出成片时�
 - 播完订阅 `AVPlayerItemDidPlayToEndTimeNotification` 显示「重播」，并**比对 `notification.object` 与当前 item**，忽略已被替换的旧条目。
 - `gestureRecognizer:shouldReceiveTouch:` 保证点「重播」按钮不会同时触发暂停手势。
 
+### 10.5 素材缩略图条：长按拖动排序
+
+缩略图条是一个横向 `UICollectionView`（`itemSize 64×72`、`spacing 8`、`sectionInset 8`、行高 88），
+顺序即时间轴顺序，也是成片顺序。实现走 UIKit 的 **drag & drop** 两条 delegate（`ViewController.m:531` 起）：
+
+| 步骤 | 方法 | 关键点 |
+| --- | --- | --- |
+| 允许拖动 | `collectionView:canMoveItemAtIndexPath:` | 只有 ≥2 个素材才允许排序 |
+| 拎起素材 | `collectionView:itemsForBeginningDragSession:atIndexPath:` | `UIDragItem.localObject` 挂 `KBMediaAsset`，只做本地重排，不需要真数据 |
+| 拖动反馈 | `collectionView:dropSessionDidUpdate:withDestinationIndexPath:` | 本地会话返回 `UIDropOperationMove` + `UICollectionViewDropIntentInsertAtDestinationIndexPath`；外部拖入返回 `UIDropOperationCancel` |
+| 松手落位 | `collectionView:performDropWithCoordinator:` | 取 `sourceIndexPath` + `destinationIndexPath`，改模型后 `performBatchUpdates:moveItemAtIndexPath:`，再调 `[coordinator dropItem:toItemAtIndexPath:]` |
+| 模型重排 | `moveAssetAtIndex:toIndex:`（`ViewController.m:590`） | `removeObjectAtIndex:` + `insertObject:atIndex:`，返回最终下标；位置没变返回 `nil` |
+
+设计要点：
+
+- **模型与动画必须是同一个下标**。`moveAssetAtIndex:toIndex:` 里模型做
+  `remove` + `insert:(to)`、collection view 做 `moveItemAtIndexPath:from → to`，
+  两者语义一致（移动后元素落在 `to`），所以"屏幕上的顺序"和"数组里的顺序"永远一致。
+  想改动这里时，务必先确认动画结果和数组结果仍然一致，否则成片顺序会和用户看到的对不上。
+- **拖到空白处**：`destinationIndexPath` 为 `nil`，按"移到末尾"处理，再由 `moveAssetAtIndex:` 夹到 `0..count-1`。
+- **`dragInteractionEnabled` 在 iPhone 上默认是 `NO`**，必须显式置 `YES`（`ViewController.m:246`），否则长按毫无反应。
+- **松手要通知 coordinator**：不调用 `dropItem:toItemAtIndexPath:` 时，拖起来的快照会飞回**原位**，
+  看起来像"没换成功"，即使 layout 已经移动了。
+- **必须有拖拽落位后的副作用**：顺序变化后立即 `invalidateTimeline`（旧成片作废）+ `refreshState`，
+  状态栏提示「已调整素材顺序 · 重新一键成片生效」，避免用户导出上一个顺序的成片。
+- **cell 复用校验**：`KBThumbnailCell.representedAsset` 与 `prepareForReuse` 双重保险，
+  防止异步出图把上一个素材的封面写进被复用的 cell。
+
 ---
 
 ## 11. 崩溃与疑难复盘
@@ -771,6 +800,20 @@ __weak UIImageView *weakImageView = iv;
 ### 11.5 横向 chip 行"只有两个半且滑不动"
 
 详见 10.2 的 ★ 段：`contentSize.width = 0`，必须左右都钉住。同类问题也出现在素材缩略图条上（素材超过 4 个就滑不动），一并修掉。
+
+### 11.6 拖拽排序：编译期与运行期两个坑
+
+**编译期**：`UICollectionViewDropItem` 是**协议**不是类，写
+`UICollectionViewDropItem *item = coordinator.items.firstObject;` 会报
+`unknown type name 'UICollectionViewDropItem'`。正确写法是
+`id<UICollectionViewDropItem> item = coordinator.items.firstObject;`。
+
+**枚举名别猜**：drop 提案用的是 `UIDropOperationCancel` / `UIDropOperationMove`（`UIDropOperation` 枚举），
+并不存在 `UICollectionViewDropOperation*` 这种名字；`intent` 才是 `UICollectionViewDropIntent*`。
+
+**运行期**：`dragInteractionEnabled` 在 iPhone 上默认 `NO`，不打开的话 `itemsForBeginningDragSession:` 根本不会被调用，
+表现是"长按没反应"。另外别忘了在 `performDropWithCoordinator:` 里调 `[coordinator dropItem:toItemAtIndexPath:]`，
+否则快照飞回原位。
 
 ---
 
@@ -1020,4 +1063,6 @@ pan      scale       = fill × 1.15，dx = dir × maxX × (2p − 1)
 | 修崩溃：封面 CGImageRef 过度释放 / 全黑 | `KBMediaAsset.m:64` |
 | 修崩溃隐患：缩略图回写用弱引用 imageView | `ViewController.m:478` |
 | 修交互：横向 chip / 缩略图条滑不动 | `ViewController.m:236`、`:265` |
+| 新增：素材缩略图条长按拖动排序（UICollectionView + Drag/Drop delegate + 序号角标） | `ViewController.m:531` 起 |
+| 文档：本文件 | `docs/TECHNICAL.md` |
 | 测试：期望值按模板现算 + 视频策略断言 | `scripts/e2e_test.m` |
