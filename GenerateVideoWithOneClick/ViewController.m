@@ -570,7 +570,8 @@ static NSString *const kKBThumbCellID = @"KBThumbnailCell";
 
 - (void)collectionView:(UICollectionView *)collectionView
    performDropWithCoordinator:(id<UICollectionViewDropCoordinator>)coordinator {
-    UICollectionViewDropItem *item = coordinator.items.firstObject;
+    // 注意：UICollectionViewDropItem 是协议不是类，必须写成 id<...>，否则编译不过
+    id<UICollectionViewDropItem> item = coordinator.items.firstObject;
     NSIndexPath *source = item.sourceIndexPath;
     if (!source) return;
     // 拖到空白处时 destinationIndexPath 为 nil → 视为移到末尾，再夹到合法下标
