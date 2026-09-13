@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcscmblueprint
+*.xccheckout
+
+# CocoaPods（依赖用 `pod install` 还原；Podfile.lock 需要提交）
+Pods/

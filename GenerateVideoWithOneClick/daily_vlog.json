@@ -1,0 +1,13 @@
+{
+  "id": "daily_vlog",
+  "name": "日常 · 慢剪",
+  "order": 2,
+  "bpm": 90,
+  "clip_beats": 4,
+  "transition_beats": 1,
+  "resolution": [1080, 1920],
+  "fps": 30,
+  "audio": "bgm_daily_90bpm",
+  "motions": ["zoom_in", "zoom_out"],
+  "transition": { "type": "dissolve", "align": "beat" }
+}

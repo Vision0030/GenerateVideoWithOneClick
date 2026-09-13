@@ -1,0 +1,13 @@
+{
+  "id": "sport_hype",
+  "name": "运动 · 高能",
+  "order": 3,
+  "bpm": 150,
+  "clip_beats": 2,
+  "transition_beats": 0.25,
+  "resolution": [1080, 1920],
+  "fps": 30,
+  "audio": "bgm_sport_150bpm",
+  "motions": ["zoom_in", "pan_left", "zoom_out", "pan_right"],
+  "transition": { "type": "dissolve", "align": "beat" }
+}

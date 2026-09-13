@@ -1,0 +1,13 @@
+{
+  "id": "travel_fast",
+  "name": "旅行 · 快闪",
+  "order": 1,
+  "bpm": 128,
+  "clip_beats": 3,
+  "transition_beats": 0.5,
+  "resolution": [1080, 1920],
+  "fps": 30,
+  "audio": "bgm_travel_128bpm",
+  "motions": ["zoom_in", "pan_right", "zoom_out", "pan_left"],
+  "transition": { "type": "dissolve", "align": "beat" }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "story_full",
+  "name": "故事 · 原速完整",
+  "order": 4,
+  "bpm": 96,
+  "clip_beats": 3,
+  "transition_beats": 1,
+  "video_mode": "full",
+  "resolution": [1080, 1920],
+  "fps": 30,
+  "audio": "bgm_story_96bpm",
+  "motions": ["zoom_in", "zoom_out"],
+  "transition": { "type": "dissolve", "align": "beat" }
+}
