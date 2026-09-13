@@ -2,6 +2,8 @@
 
 选几张照片 / 视频 → 套一个节拍模板 → 自动卡点成片、导出到相册。
 
+> 想深入看实现（架构、时间轴数学、合成器、崩溃复盘、测试）请读 **[docs/TECHNICAL.md](docs/TECHNICAL.md)**。
+
 ## 流程
 
 1. **选择照片 / 视频**：PHPicker 有序多选（图片 + 视频混选，最多 12 个），素材按点选顺序进时间轴
@@ -25,6 +27,7 @@
 | `scripts/make_bgm.py` | 合成伴奏（纯标准库 + `afconvert` 转 m4a） |
 | `scripts/e2e_test.m` | 渲染链路端到端验证 |
 | `scripts/run_e2e.sh` | 编译并运行上面的验证（默认跑全部模板） |
+| `docs/TECHNICAL.md` | 详细技术文档（架构 / 时间轴模型 / 合成器 / 复盘 / 扩展指南） |
 
 ## 模板 DSL
 
@@ -116,6 +119,6 @@ scripts/run_e2e.sh travel_fast  # 指定模板
 
 ## 待办
 
-- 素材管理：目前只能整体重选，还不能删除单个 / 拖拽排序
+- 素材管理：支持长按缩略图拖动排序；还不能删除单个素材（只能整体重选）
 - 模板 DSL 的 `beats[]`（离线节拍网格）尚未启用，demo 由 `bpm` 现算
 - 转场类型目前固定 dissolve，JSON 里的 `transition.type` 还是占位字段

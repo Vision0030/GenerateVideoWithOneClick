@@ -17,6 +17,7 @@
 #import "KBExporter.h"
 
 static const NSInteger kMaxMediaCount = 12;
+static NSString *const kKBThumbCellID = @"KBThumbnailCell";
 
 #pragma mark - 播放器容器（AVPlayerLayer 承载视图）
 
@@ -33,9 +34,98 @@ static const NSInteger kMaxMediaCount = 12;
 }
 @end
 
+#pragma mark - 素材缩略图 cell
+
+// 素材缩略图条用的 cell：一张封面 + 视频角标。cell 会被复用，所以异步出图回调
+// 必须校验"当前显示的还是不是同一个素材"，否则会把旧素材的封面写到新 cell 上。
+@interface KBThumbnailCell : UICollectionViewCell
+@property (nonatomic, strong) UIImageView *thumbView;
+@property (nonatomic, strong) UILabel *videoBadge;
+@property (nonatomic, strong) UILabel *orderLabel;
+@property (nonatomic, weak, nullable) KBMediaAsset *representedAsset;
+- (void)configureWithAsset:(KBMediaAsset *)asset order:(NSUInteger)order;
+@end
+
+@implementation KBThumbnailCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.contentView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    self.contentView.layer.cornerRadius = 8;
+    self.contentView.clipsToBounds = YES;
+
+    _thumbView = [[UIImageView alloc] init];
+    _thumbView.contentMode = UIViewContentModeScaleAspectFill;
+    _thumbView.clipsToBounds = YES;
+    [self.contentView addSubview:_thumbView];
+
+    _videoBadge = [[UILabel alloc] init];
+    _videoBadge.text = @"视频";
+    _videoBadge.font = [UIFont systemFontOfSize:9 weight:UIFontWeightSemibold];
+    _videoBadge.textColor = UIColor.whiteColor;
+    _videoBadge.backgroundColor = [UIColor systemIndigoColor];
+    _videoBadge.layer.cornerRadius = 4;
+    _videoBadge.clipsToBounds = YES;
+    _videoBadge.textAlignment = NSTextAlignmentCenter;
+    [self.contentView addSubview:_videoBadge];
+
+    // 左上角序号：素材顺序即成片顺序，标出来用户才知道拖完是第几段
+    _orderLabel = [[UILabel alloc] init];
+    _orderLabel.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightBold];
+    _orderLabel.textColor = UIColor.whiteColor;
+    _orderLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    _orderLabel.textAlignment = NSTextAlignmentCenter;
+    _orderLabel.layer.cornerRadius = 8;
+    _orderLabel.clipsToBounds = YES;
+    [self.contentView addSubview:_orderLabel];
+
+    [_thumbView mas_makeConstraints:^(MASConstraintMaker *make) {
+        make.edges.equalTo(self.contentView);
+    }];
+    [_videoBadge mas_makeConstraints:^(MASConstraintMaker *make) {
+        make.left.equalTo(self.contentView).offset(4);
+        make.bottom.equalTo(self.contentView).offset(-4);
+        make.width.mas_equalTo(30);
+        make.height.mas_equalTo(14);
+    }];
+    [_orderLabel mas_makeConstraints:^(MASConstraintMaker *make) {
+        make.left.top.equalTo(self.contentView).offset(4);
+        make.width.height.mas_equalTo(16);
+    }];
+    return self;
+}
+
+// cell 会被复用：换素材前先清干净，避免出现"上一个素材的封面残影"。
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.representedAsset = nil;
+    self.thumbView.image = nil;
+}
+
+- (void)configureWithAsset:(KBMediaAsset *)asset order:(NSUInteger)order {
+    self.representedAsset = asset;
+    self.videoBadge.hidden = (asset.type != KBMediaTypeVideo);
+    self.orderLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)order];
+    self.thumbView.image = asset.thumbnail;
+
+    if (asset.type == KBMediaTypeVideo && !asset.thumbnail) {
+        __weak typeof(self) weakSelf = self;
+        [asset loadThumbnailWithCompletion:^(UIImage *_Nullable thumb) {
+            if (!thumb || weakSelf.representedAsset != asset) return; // cell 已被复用给别人
+            weakSelf.thumbView.image = thumb;
+        }];
+    }
+}
+
+@end
+
 #pragma mark - 主控制器
 
-@interface ViewController () <PHPickerViewControllerDelegate, UIGestureRecognizerDelegate>
+@interface ViewController () <PHPickerViewControllerDelegate, UIGestureRecognizerDelegate,
+                              UICollectionViewDataSource, UICollectionViewDragDelegate,
+                              UICollectionViewDropDelegate>
 @property (nonatomic, copy) NSArray<KBTemplate *> *templates;
 @property (nonatomic, strong, nullable) KBTemplate *template;
 @property (nonatomic, copy) NSArray<KBMediaAsset *> *mediaAssets;
@@ -52,8 +142,7 @@ static const NSInteger kMaxMediaCount = 12;
 @property (nonatomic, strong) UILabel *templateNameLabel;
 @property (nonatomic, strong) UILabel *templateDetailLabel;
 @property (nonatomic, strong) UILabel *durationLabel;
-@property (nonatomic, strong) UIStackView *thumbStack;
-@property (nonatomic, strong) UIScrollView *thumbScrollView;
+@property (nonatomic, strong) UICollectionView *thumbCollectionView;
 @property (nonatomic, strong) UIButton *pickButton;
 @property (nonatomic, strong) UIButton *generateButton;
 @property (nonatomic, strong) UIButton *exportButton;
@@ -142,16 +231,24 @@ static const NSInteger kMaxMediaCount = 12;
     [self updateTemplateCard];
 
     // 素材缩略图横条
-    self.thumbScrollView = [[UIScrollView alloc] init];
-    self.thumbScrollView.showsHorizontalScrollIndicator = NO;
-    self.thumbScrollView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.04];
-    self.thumbScrollView.layer.cornerRadius = 14;
-    self.thumbScrollView.hidden = YES;
+    // 素材缩略图条：横向 collection view，长按拖动即可调整顺序
+    UICollectionViewFlowLayout *thumbLayout = [[UICollectionViewFlowLayout alloc] init];
+    thumbLayout.scrollDirection = UICollectionViewScrollDirectionHorizontal;
+    thumbLayout.itemSize = CGSizeMake(64, 72);
+    thumbLayout.minimumLineSpacing = 8;
+    thumbLayout.sectionInset = UIEdgeInsetsMake(8, 8, 8, 8);
 
-    self.thumbStack = [[UIStackView alloc] init];
-    self.thumbStack.axis = UILayoutConstraintAxisHorizontal;
-    self.thumbStack.spacing = 8;
-    [self.thumbScrollView addSubview:self.thumbStack];
+    self.thumbCollectionView = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:thumbLayout];
+    self.thumbCollectionView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.04];
+    self.thumbCollectionView.layer.cornerRadius = 14;
+    self.thumbCollectionView.showsHorizontalScrollIndicator = NO;
+    self.thumbCollectionView.alwaysBounceHorizontal = YES;
+    self.thumbCollectionView.dragInteractionEnabled = YES; // iPhone 上默认关闭，必须显式打开才能长按拖动
+    self.thumbCollectionView.dataSource = self;
+    self.thumbCollectionView.dragDelegate = self;
+    self.thumbCollectionView.dropDelegate = self;
+    [self.thumbCollectionView registerClass:[KBThumbnailCell class] forCellWithReuseIdentifier:kKBThumbCellID];
+    self.thumbCollectionView.hidden = YES;
 
     // 播放器（9:16）
     self.playerView = [[KBPlayerView alloc] init];
@@ -204,7 +301,7 @@ static const NSInteger kMaxMediaCount = 12;
     self.progressView.hidden = YES;
 
     for (UIView *view in @[titleLabel, subtitleLabel, self.templateScrollView, self.templateCard,
-                           self.thumbScrollView, self.playerView, self.pickButton, self.generateButton,
+                           self.thumbCollectionView, self.playerView, self.pickButton, self.generateButton,
                            self.exportButton, self.progressView, self.statusLabel]) {
         [self.contentView addSubview:view];
     }
@@ -257,20 +354,13 @@ static const NSInteger kMaxMediaCount = 12;
         make.left.equalTo(self.templateNameLabel);
         make.bottom.equalTo(self.templateCard).offset(-14);
     }];
-    [self.thumbScrollView mas_makeConstraints:^(MASConstraintMaker *make) {
+    [self.thumbCollectionView mas_makeConstraints:^(MASConstraintMaker *make) {
         make.top.equalTo(self.templateCard.mas_bottom).offset(14);
         make.left.right.equalTo(self.contentView);
         make.height.mas_equalTo(88);
     }];
-    [self.thumbStack mas_makeConstraints:^(MASConstraintMaker *make) {
-        // 同上：缩略图条也要左右都钉住才能横向滚动
-        make.top.equalTo(self.thumbScrollView).offset(8);
-        make.left.equalTo(self.thumbScrollView).offset(8);
-        make.right.equalTo(self.thumbScrollView).offset(-8);
-        make.height.mas_equalTo(72);
-    }];
     [self.playerView mas_makeConstraints:^(MASConstraintMaker *make) {
-        make.top.equalTo(self.thumbScrollView.mas_bottom).offset(14);
+        make.top.equalTo(self.thumbCollectionView.mas_bottom).offset(14);
         make.centerX.equalTo(self.contentView);
         make.width.mas_equalTo(220);
         self.playerHeightConstraint = make.height.mas_equalTo(0); // 未生成成片时收起
@@ -414,13 +504,15 @@ static const NSInteger kMaxMediaCount = 12;
 
 - (void)refreshState {
     NSUInteger n = self.mediaAssets.count;
+    NSString *reorderHint = (n >= 2) ? @" · 长按缩略图可拖动排序" : @"";
     if (n > 0 && self.template) {
         NSTimeInterval total = [self.template totalDurationForClipCount:n];
         if (self.template.playsVideoInFull) {
-            self.durationLabel.text = [NSString stringWithFormat:@"已选 %lu 个素材 · 预计成片 ≥ %.1f 秒（视频按原速完整播放）",
-                                       (unsigned long)n, total];
+            self.durationLabel.text = [NSString stringWithFormat:@"已选 %lu 个素材 · 预计成片 ≥ %.1f 秒（视频按原速完整播放）%@",
+                                       (unsigned long)n, total, reorderHint];
         } else {
-            self.durationLabel.text = [NSString stringWithFormat:@"已选 %lu 个素材（照片+视频） · 预计成片 %.1f 秒", (unsigned long)n, total];
+            self.durationLabel.text = [NSString stringWithFormat:@"已选 %lu 个素材（照片+视频） · 预计成片 %.1f 秒%@",
+                                       (unsigned long)n, total, reorderHint];
         }
     } else if (n > 0) {
         self.durationLabel.text = [NSString stringWithFormat:@"已选 %lu 个素材 · 缺少模板", (unsigned long)n];
@@ -432,56 +524,90 @@ static const NSInteger kMaxMediaCount = 12;
 }
 
 - (void)showThumbnails {
-    for (UIView *v in self.thumbStack.arrangedSubviews) {
-        [self.thumbStack removeArrangedSubview:v];
-        [v removeFromSuperview];
+    [self.thumbCollectionView reloadData];
+    self.thumbCollectionView.hidden = (self.mediaAssets.count == 0);
+}
+
+#pragma mark - 缩略图条：长按拖动排序
+
+- (NSInteger)collectionView:(UICollectionView *)collectionView numberOfItemsInSection:(NSInteger)section {
+    return (NSInteger)self.mediaAssets.count;
+}
+
+- (__kindof UICollectionViewCell *)collectionView:(UICollectionView *)collectionView
+                           cellForItemAtIndexPath:(NSIndexPath *)indexPath {
+    KBThumbnailCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:kKBThumbCellID
+                                                                     forIndexPath:indexPath];
+    if (indexPath.item < (NSInteger)self.mediaAssets.count) {
+        [cell configureWithAsset:self.mediaAssets[indexPath.item] order:(NSUInteger)indexPath.item + 1];
     }
-    for (KBMediaAsset *asset in self.mediaAssets) {
-        UIView *cell = [[UIView alloc] init];
-        UIImageView *iv = [[UIImageView alloc] init];
-        iv.image = asset.thumbnail;
-        iv.contentMode = UIViewContentModeScaleAspectFill;
-        iv.layer.cornerRadius = 8;
-        iv.clipsToBounds = YES;
-        iv.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
-        [cell addSubview:iv];
+    return cell;
+}
 
-        UILabel *badge = nil;
-        if (asset.type == KBMediaTypeVideo) {
-            badge = [[UILabel alloc] init];
-            badge.text = @"视频";
-            badge.font = [UIFont systemFontOfSize:9 weight:UIFontWeightSemibold];
-            badge.textColor = UIColor.whiteColor;
-            badge.backgroundColor = [UIColor systemIndigoColor];
-            badge.layer.cornerRadius = 4;
-            badge.clipsToBounds = YES;
-            badge.textAlignment = NSTextAlignmentCenter;
-            [cell addSubview:badge];
-        }
+- (BOOL)collectionView:(UICollectionView *)collectionView canMoveItemAtIndexPath:(NSIndexPath *)indexPath {
+    return self.mediaAssets.count > 1; // 只有一个素材时没有排序的意义
+}
 
-        [iv mas_makeConstraints:^(MASConstraintMaker *make) {
-            make.edges.equalTo(cell);
-            make.width.mas_equalTo(64);
-            make.height.mas_equalTo(72);
-        }];
-        if (badge) {
-            [badge mas_makeConstraints:^(MASConstraintMaker *make) {
-                make.left.equalTo(cell).offset(4);
-                make.bottom.equalTo(cell).offset(-4);
-                make.width.mas_equalTo(30);
-                make.height.mas_equalTo(14);
-            }];
-        }
-        [self.thumbStack addArrangedSubview:cell];
+- (NSArray<UIDragItem *> *)collectionView:(UICollectionView *)collectionView
+            itemsForBeginningDragSession:(id<UIDragSession>)session
+                             atIndexPath:(NSIndexPath *)indexPath {
+    if (self.mediaAssets.count < 2 || indexPath.item >= (NSInteger)self.mediaAssets.count) return @[];
+    UIDragItem *item = [[UIDragItem alloc] initWithItemProvider:[[NSItemProvider alloc] init]];
+    item.localObject = self.mediaAssets[indexPath.item];
+    return @[item];
+}
 
-        if (asset.type == KBMediaTypeVideo && !asset.thumbnail) {
-            __weak UIImageView *weakImageView = iv;
-            [asset loadThumbnailWithCompletion:^(UIImage *_Nullable thumb) {
-                weakImageView.image = thumb;
-            }];
-        }
+- (UICollectionViewDropProposal *)collectionView:(UICollectionView *)collectionView
+                                  dropSessionDidUpdate:(id<UIDropSession>)session
+                              withDestinationIndexPath:(NSIndexPath *)destinationIndexPath {
+    // 只接受本 App 内部的拖动（外面拖进来的内容直接取消）
+    if (!session.localDragSession) {
+        return [[UICollectionViewDropProposal alloc] initWithDropOperation:UIDropOperationCancel];
     }
-    self.thumbScrollView.hidden = (self.mediaAssets.count == 0);
+    return [[UICollectionViewDropProposal alloc] initWithDropOperation:UIDropOperationMove
+                                                                intent:UICollectionViewDropIntentInsertAtDestinationIndexPath];
+}
+
+- (void)collectionView:(UICollectionView *)collectionView
+   performDropWithCoordinator:(id<UICollectionViewDropCoordinator>)coordinator {
+    UICollectionViewDropItem *item = coordinator.items.firstObject;
+    NSIndexPath *source = item.sourceIndexPath;
+    if (!source) return;
+    // 拖到空白处时 destinationIndexPath 为 nil → 视为移到末尾，再夹到合法下标
+    NSInteger to = coordinator.destinationIndexPath ? coordinator.destinationIndexPath.item
+                                                   : (NSInteger)self.mediaAssets.count;
+    NSIndexPath *finalIndexPath = [self moveAssetAtIndex:source.item toIndex:to];
+    // 把拖起来的那张快照落到新位置；不调用的话快照会飞回原位，看起来像没换成功
+    if (finalIndexPath) {
+        [coordinator dropItem:item.dragItem toItemAtIndexPath:finalIndexPath];
+    }
+}
+
+// 把第 from 个素材挪到第 to 个位置：模型与 collection view 动画用同一个目标下标，
+// 保证"屏幕上的顺序"和"数组里的顺序"永远一致（顺序即成片顺序）。
+// 返回移动后的最终位置；位置没变（或下标非法）时返回 nil。
+- (nullable NSIndexPath *)moveAssetAtIndex:(NSInteger)from toIndex:(NSInteger)to {
+    NSInteger count = (NSInteger)self.mediaAssets.count;
+    if (count < 2 || from < 0 || from >= count) return nil;
+    to = MIN(MAX(to, 0), count - 1);       // 夹到合法范围（拖到空白处 = 末尾）
+    if (to == from) return nil;            // 位置没变，不做无谓的重建
+
+    NSMutableArray<KBMediaAsset *> *assets = [self.mediaAssets mutableCopy];
+    KBMediaAsset *moved = assets[(NSUInteger)from];
+    [assets removeObjectAtIndex:(NSUInteger)from];
+    [assets insertObject:moved atIndex:(NSUInteger)to];
+    self.mediaAssets = assets;
+
+    NSIndexPath *source = [NSIndexPath indexPathForItem:from inSection:0];
+    NSIndexPath *destination = [NSIndexPath indexPathForItem:to inSection:0];
+    [self.thumbCollectionView performBatchUpdates:^{
+        [self.thumbCollectionView moveItemAtIndexPath:source toIndexPath:destination];
+    } completion:nil];
+
+    [self invalidateTimeline]; // 顺序变了，上一版成片作废
+    [self refreshState];
+    [self setStatus:@"已调整素材顺序 · 重新一键成片生效" busy:NO];
+    return destination;
 }
 
 #pragma mark - 流程：选择素材
@@ -515,7 +641,7 @@ static const NSInteger kMaxMediaCount = 12;
         [self invalidateTimeline];
         [self showThumbnails];
         [self refreshState];
-        [self setStatus:[NSString stringWithFormat:@"已加载 %lu 个素材，可以一键成片了", (unsigned long)assets.count] busy:NO];
+        [self setStatus:[NSString stringWithFormat:@"已加载 %lu 个素材 · 长按缩略图可拖动排序，然后一键成片", (unsigned long)assets.count] busy:NO];
     }];
 }
 
